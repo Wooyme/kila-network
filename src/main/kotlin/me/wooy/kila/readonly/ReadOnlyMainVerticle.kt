@@ -1,31 +1,42 @@
 package me.wooy.kila.readonly
 
 import io.vertx.core.AbstractVerticle
+import io.vertx.core.Vertx
 import io.vertx.core.buffer.Buffer
 import io.vertx.core.net.NetSocket
 import io.vertx.ext.web.client.WebClient
 import io.vertx.jdbcclient.JDBCConnectOptions
 import io.vertx.jdbcclient.JDBCPool
 import io.vertx.sqlclient.PoolOptions
+import io.vertx.sqlclient.Tuple
 import me.wooy.kila.readonly.client.BaiduPCSClient
 import me.wooy.kila.utils.appendCLong
+import me.wooy.kila.utils.getCInt
 import me.wooy.kila.utils.getCLong
 import java.util.concurrent.ConcurrentHashMap
 
 class ReadOnlyMainVerticle:AbstractVerticle() {
   private val cachedClient = ConcurrentHashMap<String,BaiduPCSClient>()
   private val jdbcPool by lazy {
-    JDBCPool.pool(vertx, JDBCConnectOptions().setJdbcUrl("jdbc:sqlite:kila.db"), PoolOptions().setMaxSize(1))
+    JDBCPool.pool(vertx, JDBCConnectOptions().setJdbcUrl("jdbc:sqlite:./kila.sqlite"), PoolOptions().setMaxSize(1))
   }
 
   private val webClient by lazy {WebClient.create(vertx)}
   override fun start() {
+    jdbcPool.preparedQuery("SELECT * FROM files where ROWID=?").execute(Tuple.of(1)).onSuccess {
+      it.forEach {
+        println(it.getString("uuid"))
+      }
+    }.onFailure {
+      it.printStackTrace()
+    }
     vertx.createNetServer().connectHandler { conn ->
       println("Connect")
       conn.handler {
         when (it.getByte(0)) {
           0.toByte() -> {
-            handleList(conn)
+            val id = it.getCInt(1)
+            handleList(conn,id)
           }
           2.toByte() -> {
             val uuid = it.getString(1, 37)
@@ -44,17 +55,25 @@ class ReadOnlyMainVerticle:AbstractVerticle() {
     }
   }
 
-  private fun handleList(conn: NetSocket){
-    jdbcPool.preparedQuery("SELECT * FROM files").execute().onSuccess {
+  private fun handleList(conn: NetSocket,id:Int){
+    println("[List] index:$id")
+    jdbcPool.preparedQuery("SELECT * FROM files where ROWID=?").execute(Tuple.of(id)).onSuccess {
       val buffer = Buffer.buffer()
       it.forEach {
         val uuid = it.getString("uuid")
         val path = it.getString("path")
         val size = it.getLong("size")
         val zeros = ByteArray(1024-path.length){0}
-        buffer.appendString(uuid).appendCLong(size).appendString(path).appendBytes(zeros)
+        println(uuid)
+        buffer.appendString(uuid).appendByte(0).appendCLong(size).appendString(path).appendBytes(zeros)
+      }
+      if(buffer.length()==0){
+        buffer.appendBytes(ByteArray(37+Long.SIZE_BYTES+1024){0})
       }
       conn.write(buffer)
+    }.onFailure {
+      it.printStackTrace()
+      conn.write(Buffer.buffer(ByteArray(37+Long.SIZE_BYTES+1024){0}))
     }
   }
 

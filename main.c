@@ -206,9 +206,24 @@ static int socket_create(struct kila_create *k_create){
 	mutex_unlock(socket_mutex);
 	return res;
 }
-
-static int socket_init(void){
-
+struct single_file{
+	char uuid[37];
+	size_t size;
+	char path[1024];
+};
+static int socket_init(int num,char *buf){
+	int i,index;
+	get_random_bytes(&i,1);
+	index = i%POOL_SIZE;
+	struct mutex *socket_mutex = &socket_mutex_arr[index];
+	mutex_lock(socket_mutex);
+	struct socket *sock = socket_arr[index];
+	char _buf[1+sizeof(int)];
+	_buf[0] = I;
+	memcpy(_buf+1,&num,sizeof(int));
+	tcp_client_send(sock,_buf,1+sizeof(int),MSG_DONTWAIT);
+	tcp_client_receive(sock,buf,sizeof(struct single_file),MSG_WAITALL);
+	mutex_unlock(socket_mutex);
 	return 0;
 }
 struct kila_file {
@@ -334,7 +349,7 @@ const struct inode_operations lwfs_inode_operations = {
 };
 
 static struct dentry *lfs_create_file(struct super_block *sb,
-									  struct dentry *dir, const char *name){
+									  struct dentry *dir, const char *name,const char* uuid,size_t size){
 	struct dentry *dentry;
 	struct inode *inode;
 	dentry = d_alloc_name(dir, name);
@@ -344,12 +359,13 @@ static struct dentry *lfs_create_file(struct super_block *sb,
 	if (!inode)
 		goto out_dput;
 	struct kila_file * k_file = kvmalloc(sizeof(struct kila_file),GFP_KERNEL);
-	uuid_t uuid = {0};
-	generate_random_uuid(uuid.b);
-	snprintf(k_file->uuid, UUID_LEN+1, "%pUb", &uuid);
-	k_file->k_size = 0;
-	inode->i_private = k_file;
+	// uuid_t uuid = {0};
+	// generate_random_uuid(uuid.b);
+	//snprintf(k_file->uuid, UUID_LEN+1, "%pUb", uuid);
 
+	memcpy(k_file->uuid,uuid,36);
+	k_file->k_size = size;
+	inode->i_private = k_file;
 	d_add(dentry, inode);
 	return dentry;
 out_dput:
@@ -384,9 +400,15 @@ out:
 
 static void lfs_create_files(struct super_block *sb, struct dentry *root){
 	struct dentry *subdir;
-
-	lfs_create_file(sb, root, "counter");
-
+	struct single_file file;
+	int i;
+	for(i=1;i<100;i++){
+		socket_init(i,(char *)&file);
+		printk("i:%d",i);
+		if(strlen(file.uuid)==0) break;
+		printk("%s,%s",file.path,file.uuid);
+		lfs_create_file(sb, root, file.path,file.size,file.uuid);
+	}
 	// atomic_set(&subcounter, 0);
 	// subdir = lfs_create_dir(sb, root, "subdir");
 	// if (subdir)
