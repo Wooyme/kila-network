@@ -3,11 +3,39 @@ package me.wooy.kila
 import io.vertx.core.buffer.Buffer
 import me.wooy.kila.client.BufferClient
 import sun.misc.Queue
+import java.lang.IndexOutOfBoundsException
+import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import kotlin.math.max
 
 class CachedBuffer(private val maxBlock:Int = 4,private val maxSize:Int = 1024*1024,private val client:BufferClient) {
+  inner class Block(var begin:Long, var end:Long, private val buffer:Buffer){
+    fun between(offset:Long) = offset in begin..end
+    fun write(offset:Long,buf:Buffer):Buffer?{
+      val afterBegin = (offset-begin).toInt()
+      val newEnd = offset+buf.length()
+      if(newEnd>end){
+        if(newEnd-begin>maxSize){
+          buffer.setBuffer(afterBegin,buf,0,maxSize-(end-begin).toInt())
+          release()
+          return buf.getBuffer(maxSize-(end-begin).toInt(),buf.length())
+        }else{
+          buffer.setBuffer(afterBegin,buf)
+          end = newEnd
+        }
+      }else{
+        buffer.setBuffer(afterBegin,buf)
+      }
+      return null
+    }
+
+    fun release(){
+      blocks.remove(this)
+      client.send(begin,buffer)
+    }
+  }
+  private val blocks = LinkedList<Block>()
   private val bufMap = ConcurrentHashMap<Long,Buffer>()
   private val releaseQueue = LinkedBlockingQueue<Long>()
   @Synchronized
