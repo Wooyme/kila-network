@@ -1,1 +1,1 @@
-umount test/ && rmmod kila
+umount note/ && rmmod kila
