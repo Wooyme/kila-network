@@ -15,7 +15,7 @@ class BaiduPCSClient(private val uuid:String,private val webClient: WebClient) {
   private fun getURL(offset:Long):Triple<String,Long,Long>{
     val index = (offset/ SINGLE_SIZE).toInt()
     urlMap[index]?.let { return it }
-    val p = ProcessBuilder("BaiduPCS-Go", "locate",ROOT+uuid+if(index<10) "0$index" else index).start()
+    val p = ProcessBuilder("./BaiduPCS-Go", "locate",ROOT+uuid+if(index<10) "0$index" else index).start()
     val stderr: String = IOUtils.toString(p.errorStream, Charset.defaultCharset())
     val stdout: String = IOUtils.toString(p.inputStream, Charset.defaultCharset())
     if(stderr.isNotEmpty()){
@@ -68,6 +68,16 @@ class BaiduPCSClient(private val uuid:String,private val webClient: WebClient) {
 
   companion object{
     private const val SINGLE_SIZE = 1000*1024L
-    private const val ROOT = "/kila/"
+    private const val ROOT = "/kila/kila/"
+    fun test(){
+      println("BaiduPCS check")
+      val p = ProcessBuilder("./BaiduPCS-Go", "ls","kila").start()
+      val stderr: String = IOUtils.toString(p.errorStream, Charset.defaultCharset())
+      val stdout: String = IOUtils.toString(p.inputStream, Charset.defaultCharset())
+      if(stderr.isNotEmpty()){
+        println(stderr)
+      }
+      println(stdout)
+    }
   }
 }

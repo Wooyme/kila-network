@@ -13,6 +13,7 @@ import me.wooy.kila.readonly.client.BaiduPCSClient
 import me.wooy.kila.utils.appendCLong
 import me.wooy.kila.utils.getCInt
 import me.wooy.kila.utils.getCLong
+import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
 class ReadOnlyMainVerticle:AbstractVerticle() {
@@ -23,6 +24,7 @@ class ReadOnlyMainVerticle:AbstractVerticle() {
 
   private val webClient by lazy {WebClient.create(vertx)}
   override fun start() {
+    BaiduPCSClient.test()
     jdbcPool.preparedQuery("SELECT * FROM files where ROWID=?").execute(Tuple.of(1)).onSuccess {
       it.forEach {
         println(it.getString("uuid"))
@@ -64,16 +66,16 @@ class ReadOnlyMainVerticle:AbstractVerticle() {
         val path = it.getString("path")
         val size = it.getLong("size")
         val zeros = ByteArray(1024-path.length){0}
-        println(uuid)
-        buffer.appendString(uuid).appendByte(0).appendCLong(size).appendString(path).appendBytes(zeros)
+        buffer.appendString(uuid).appendBytes(ByteArray(4){0}).appendCLong(size).appendString(path).appendBytes(zeros)
       }
       if(buffer.length()==0){
-        buffer.appendBytes(ByteArray(37+Long.SIZE_BYTES+1024){0})
+        buffer.appendBytes(ByteArray(1072){0})
       }
+      println(buffer.length())
       conn.write(buffer)
     }.onFailure {
       it.printStackTrace()
-      conn.write(Buffer.buffer(ByteArray(37+Long.SIZE_BYTES+1024){0}))
+      conn.write(Buffer.buffer(ByteArray(1072){0}))
     }
   }
 

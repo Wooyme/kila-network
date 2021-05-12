@@ -245,43 +245,59 @@ static struct inode *lfs_make_inode(struct super_block *sb, int mode, const stru
 	return inode;
 }
 
-
+struct opened_file{
+	struct kila_file *file;
+	loff_t offset;
+};
 static int lfs_open(struct inode *inode, struct file *filp){
-	filp->private_data = inode->i_private;
+	struct opened_file * opened = kvmalloc(sizeof(struct opened_file),GFP_KERNEL);
+	opened->file = inode->i_private;
+	opened->offset = 0;
+	filp->private_data = opened;
 	return 0;
 }
 
+static int lfs_release(struct inode *inode,struct file *filp){
+	kvfree(filp->private_data);
+	return 0;
+}
+static int LFS_BLOCK_SIZE = 50240;
 static ssize_t lfs_read_file(struct file *filp, char *buf,
 							 size_t size, loff_t *offset){
-	struct kila_file *k_file = (struct kila_file *)filp->private_data;
+	struct opened_file * opened = (struct opened_file *)filp->private_data;
+	struct kila_file *k_file = opened->file;
 	size_t avaliable = k_file->k_size - *offset>size?size:k_file->k_size-*offset;
 	if(avaliable<=0){
 		return 0;
 	}
-	char tmp[512];
+	//char tmp[LFS_BLOCK_SIZE];
+	char *tmp = (char*)kvmalloc(LFS_BLOCK_SIZE,GFP_KERNEL);
 	struct kila_query k_query;
-	int pointer = 0;
-	int t_size = 0;
+	loff_t pointer = 0;
+	size_t t_size = 0;
 fuck:
-	t_size = avaliable-pointer>512?512:avaliable-pointer;
+	t_size = avaliable-pointer>LFS_BLOCK_SIZE?LFS_BLOCK_SIZE:avaliable-pointer;
 	k_query.uuid = k_file->uuid;
 	k_query.length = t_size;
-	k_query.offset = *offset+pointer;
+	k_query.offset = opened->offset+*offset+pointer;
+	printk("query_offset:%ld,op_offset:%ld,offset:%ld,pointer:%ld,size:%ld",k_query.offset,opened->offset,*offset,pointer,size);
 	socket_query(&k_query,tmp);
 	if (copy_to_user(buf+pointer, tmp, t_size))
 	 	return -EFAULT;
-	if(avaliable-pointer>512){
+	if(avaliable-pointer>LFS_BLOCK_SIZE){
 		pointer+=t_size;
 		goto fuck;
 	}
-	*offset += pointer+t_size;
+	kvfree(tmp);
+	opened->offset += pointer+t_size;
 	return pointer+t_size;
 }
 
 
 static ssize_t lfs_write_file(struct file *filp, const char *buf,
 							  size_t size, loff_t *offset){
-	struct kila_file *k_file = (struct kila_file *)filp->private_data;
+	struct opened_file * opened = (struct opened_file *)filp->private_data;
+	struct kila_file *k_file = opened->file;
 	struct inode * inode = filp->f_inode;
 	char tmp[size];
 	memset(tmp, 0, size);
@@ -291,22 +307,44 @@ static ssize_t lfs_write_file(struct file *filp, const char *buf,
 	k_write.uuid = k_file->uuid;
 	k_write.buf = tmp;
 	k_write.length = size;
-	k_write.offset = *offset;
+	k_write.offset = opened->offset+*offset;
 	int res = socket_write(&k_write);
 	k_file->k_size = res;
 	inode->i_size = res;
 	return size;
 }
 
+static loff_t lfs_seek_file(struct file *filp,loff_t offset,int whence){
+	struct opened_file * opened = (struct opened_file *)filp->private_data;
+	struct kila_file *k_file = opened->file;
+	loff_t temp;
+	printk("Seek %ld  %d",offset,whence);
+	if(whence==0){
+		temp = offset;
+	}else if(whence == 1){
+		temp +=offset;
+	}else if(whence == 2){
+		temp = k_file->k_size+offset;
+	}
+	if(temp>k_file->k_size){
+		return -1;
+	}
+	opened->offset = temp;
+	return opened->offset;
+}
+
 static struct file_operations lfs_file_ops = {
 	.open = lfs_open,
 	.read = lfs_read_file,
 	.write = lfs_write_file,
+	.release = lfs_release,
+	.llseek = lfs_seek_file
 };
+
 
 static int lfs_create(struct inode *dir,struct dentry *dentry,umode_t mode,bool unknown){
 	struct inode *inode;
-	inode = lfs_make_inode(dir->i_sb,S_IFREG | 0777, &lfs_file_ops);
+	inode = lfs_make_inode(dir->i_sb,S_IFREG | 0444, &lfs_file_ops);
 	int error = -ENOSPC;
     if (inode) {
 		int path_len;
@@ -355,7 +393,7 @@ static struct dentry *lfs_create_file(struct super_block *sb,
 	dentry = d_alloc_name(dir, name);
 	if (!dentry)
 		goto out;
-	inode = lfs_make_inode(sb, S_IFREG | 0777, &lfs_file_ops);
+	inode = lfs_make_inode(sb, S_IFREG | 0444, &lfs_file_ops);
 	if (!inode)
 		goto out_dput;
 	struct kila_file * k_file = kvmalloc(sizeof(struct kila_file),GFP_KERNEL);
@@ -363,9 +401,10 @@ static struct dentry *lfs_create_file(struct super_block *sb,
 	// generate_random_uuid(uuid.b);
 	//snprintf(k_file->uuid, UUID_LEN+1, "%pUb", uuid);
 
-	memcpy(k_file->uuid,uuid,36);
+	memcpy(k_file->uuid,uuid,UUID_LEN+1);
 	k_file->k_size = size;
 	inode->i_private = k_file;
+	inode->i_size = size;
 	d_add(dentry, inode);
 	return dentry;
 out_dput:
@@ -384,7 +423,7 @@ static struct dentry *lfs_create_dir(struct super_block *sb,
 	if (!dentry)
 		goto out;
 
-	inode = lfs_make_inode(sb, S_IFDIR | 0777, &simple_dir_operations);
+	inode = lfs_make_inode(sb, S_IFDIR | 0444, &simple_dir_operations);
 	if (!inode)
 		goto out_dput;
 	inode->i_op = &lfs_dir_inode_operations;
@@ -406,8 +445,8 @@ static void lfs_create_files(struct super_block *sb, struct dentry *root){
 		socket_init(i,(char *)&file);
 		printk("i:%d",i);
 		if(strlen(file.uuid)==0) break;
-		printk("%s,%s",file.path,file.uuid);
-		lfs_create_file(sb, root, file.path,file.size,file.uuid);
+		printk("%s,%ld,%s",file.path,file.size,file.uuid);
+		lfs_create_file(sb, root, file.path,file.uuid,file.size);
 	}
 	// atomic_set(&subcounter, 0);
 	// subdir = lfs_create_dir(sb, root, "subdir");
@@ -430,8 +469,8 @@ static int lfs_fill_super(struct super_block *sb, void *data, int silent){
 	sb->s_magic = LFS_MAGIC;
 	sb->s_op = &lfs_s_ops;
 
-	root = lfs_make_inode(sb, S_IFDIR | 0777, &simple_dir_operations);
-	inode_init_owner(root, NULL, S_IFDIR | 0777);
+	root = lfs_make_inode(sb, S_IFDIR | 0444, &simple_dir_operations);
+	inode_init_owner(root, NULL, S_IFDIR | 0444);
 	if (!root)
 		goto out;
 	root->i_op = &lfs_dir_inode_operations;
@@ -453,8 +492,7 @@ out:
 
 static struct dentry *lfs_get_super(struct file_system_type *fst,
 									int flags, const char *devname, void *data){
-	printk("Size_t: %ld,Loff_t: %ld",sizeof(size_t),sizeof(loff_t));
-	
+	printk("Size_t: %ld,Loff_t: %ld, Single_file: %ld",sizeof(size_t),sizeof(loff_t),sizeof(struct single_file));
 	int i;
 	for(i=0;i<POOL_SIZE;i++){
 		init_mutex(i);
