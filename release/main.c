@@ -29,8 +29,6 @@ MODULE_AUTHOR("Wooyme");
 #define POOL_SIZE 1
 #define UUID_LEN 36
 static const char IP[] = {127,0,0,1,'\0'};
-static struct mutex socket_mutex_arr[POOL_SIZE];
-static struct socket *socket_arr[POOL_SIZE] = {0};
 static u32 create_address(u8 *ip){
     u32 addr = 0;
     int i;
@@ -43,10 +41,11 @@ static u32 create_address(u8 *ip){
     }
     return addr;
 }
-static int init_socket(int index){
+static struct socket * create_socket(){
 	struct sockaddr_in saddr;
 	int ret;
-	ret = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP, &socket_arr[index]);
+	struct socket *sock = (struct socket *)kvmalloc(sizeof(struct socket));
+	ret = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP, sock);
     if(ret < 0){
         printk("Error: %d while creating first socket", ret);
         goto err;
@@ -55,20 +54,15 @@ static int init_socket(int index){
     saddr.sin_family = AF_INET;
     saddr.sin_port = htons(PORT);
     saddr.sin_addr.s_addr = htonl(create_address(IP));
-	ret = socket_arr[index]->ops->connect(socket_arr[index], (struct sockaddr *)&saddr\
-                        , sizeof(saddr), O_RDWR);
+	ret = sock->ops->connect(sock, (struct sockaddr *)&saddr,sizeof(saddr), O_RDWR);
     if(ret && (ret != -EINPROGRESS)){
         printk("Error: %d while connecting using conn", ret);
         goto err;
     }
-	return 0;
+	return sock;
 err:
 	return -1;
-}
 
-static int init_mutex(int index){
-	mutex_init(&socket_mutex_arr[index]);
-	return 0;
 }
 
 static int tcp_client_send(struct socket *sock, const char *buf, const size_t length,unsigned long flags){
@@ -149,13 +143,7 @@ struct kila_write{
 	size_t length;
 	loff_t offset;
 };
-static int socket_write(struct kila_write *k_write){
-	int i,index;
-	get_random_bytes(&i,1);
-	index = i%POOL_SIZE;
-	struct mutex *socket_mutex = &socket_mutex_arr[index];
-	mutex_lock(socket_mutex);
-	struct socket *sock = socket_arr[index];
+static int socket_write(struct socket * sock,struct kila_write *k_write){
 	size_t res = 0;
 	int total_len = 1+UUID_LEN+sizeof(loff_t)+sizeof(size_t)+k_write->length;
 	char buf[total_len];
@@ -166,16 +154,9 @@ static int socket_write(struct kila_write *k_write){
 	memcpy(buf+1+UUID_LEN+sizeof(loff_t)+sizeof(size_t),k_write->buf,k_write->length);
 	tcp_client_send(sock,buf,total_len,MSG_DONTWAIT);
     tcp_client_receive(sock, (char *)&res,sizeof(size_t), MSG_WAITALL);
-	mutex_unlock(socket_mutex);
 	return res;
 }
-static int socket_query(struct kila_query *k_query,char *recv){
-	int i,index;
-	get_random_bytes(&i,1);
-	index = i%POOL_SIZE;
-	struct mutex *socket_mutex = &socket_mutex_arr[index];
-	mutex_lock(socket_mutex);
-	struct socket *sock = socket_arr[index];
+static int socket_query(struct socket * sock,struct kila_query *k_query,char *recv){
 	int total_len =1+UUID_LEN+sizeof(size_t)+sizeof(loff_t);
 	char buf[total_len];
 	buf[0] = Q;
@@ -184,16 +165,9 @@ static int socket_query(struct kila_query *k_query,char *recv){
 	memcpy(buf+1+UUID_LEN+sizeof(loff_t),&k_query->length,sizeof(size_t));
 	tcp_client_send(sock,buf,total_len,MSG_DONTWAIT);
     tcp_client_receive(sock, recv,k_query->length, MSG_WAITALL);
-	mutex_unlock(socket_mutex);
 	return 0;
 }
-static int socket_create(struct kila_create *k_create){
-	int i,index;
-	get_random_bytes(&i,1);
-	index = i%POOL_SIZE;
-	struct mutex *socket_mutex = &socket_mutex_arr[index];
-	mutex_lock(socket_mutex);
-	struct socket *sock = socket_arr[index];
+static int socket_create(struct socket * sock,struct kila_create *k_create){
 	int res = 0;
 	int total_len =1+UUID_LEN+sizeof(size_t)+k_create->length;
 	char buf[total_len];
@@ -203,7 +177,6 @@ static int socket_create(struct kila_create *k_create){
 	memcpy(buf+1+UUID_LEN+sizeof(size_t),k_create->name,k_create->length);
 	tcp_client_send(sock,buf,total_len,MSG_DONTWAIT);
     tcp_client_receive(sock, (char *)&res,sizeof(int), MSG_WAITALL);
-	mutex_unlock(socket_mutex);
 	return res;
 }
 struct single_file{
@@ -211,19 +184,12 @@ struct single_file{
 	size_t size;
 	char path[1024];
 };
-static int socket_init(int num,char *buf){
-	int i,index;
-	get_random_bytes(&i,1);
-	index = i%POOL_SIZE;
-	struct mutex *socket_mutex = &socket_mutex_arr[index];
-	mutex_lock(socket_mutex);
-	struct socket *sock = socket_arr[index];
+static int socket_init(struct socket * sock,int num,char *buf){
 	char _buf[1+sizeof(int)];
 	_buf[0] = I;
 	memcpy(_buf+1,&num,sizeof(int));
 	tcp_client_send(sock,_buf,1+sizeof(int),MSG_DONTWAIT);
 	tcp_client_receive(sock,buf,sizeof(struct single_file),MSG_WAITALL);
-	mutex_unlock(socket_mutex);
 	return 0;
 }
 struct kila_file {
@@ -247,17 +213,21 @@ static struct inode *lfs_make_inode(struct super_block *sb, int mode, const stru
 
 struct opened_file{
 	struct kila_file *file;
+	struct socket *sock;
 	loff_t offset;
 };
 static int lfs_open(struct inode *inode, struct file *filp){
 	struct opened_file * opened = kvmalloc(sizeof(struct opened_file),GFP_KERNEL);
 	opened->file = inode->i_private;
 	opened->offset = 0;
+	opened->sock = create_socket();
 	filp->private_data = opened;
 	return 0;
 }
 
 static int lfs_release(struct inode *inode,struct file *filp){
+	struct socket *sock = filp->sock;
+	sock_release(sock);
 	kvfree(filp->private_data);
 	return 0;
 }
@@ -493,11 +463,6 @@ out:
 static struct dentry *lfs_get_super(struct file_system_type *fst,
 									int flags, const char *devname, void *data){
 	printk("Size_t: %ld,Loff_t: %ld, Single_file: %ld",sizeof(size_t),sizeof(loff_t),sizeof(struct single_file));
-	int i;
-	for(i=0;i<POOL_SIZE;i++){
-		init_mutex(i);
-		init_socket(i);
-	}
 	return mount_nodev(fst, flags, data, lfs_fill_super);
 }
 
@@ -513,14 +478,7 @@ static int __init lfs_init(void){
 }
 
 static void __exit lfs_exit(void){
-
 	unregister_filesystem(&lfs_type);
-	int i;
-	for(i=0;i<POOL_SIZE;i++){
-		if(socket_arr[i]!=0){
-			sock_release(socket_arr[i]);
-		}
-	}
 }
 
 module_init(lfs_init);
